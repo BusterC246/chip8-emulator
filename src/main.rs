@@ -29,6 +29,6 @@ fn main() {
             chip8.execute(opcode);
         }
 
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(16));
     }
 }
