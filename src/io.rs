@@ -1,11 +1,10 @@
 use sdl2::keyboard::Scancode;
 use sdl2::pixels;
 
-pub const DISPLAY_WIDTH: u8 = 128;
-pub const DISPLAY_HEIGHT: u8 = 64;
+pub const DISPLAY_WIDTH: u8 = 64;
+pub const DISPLAY_HEIGHT: u8 = 32;
 
 pub struct IO {
-    sdl_context: sdl2::Sdl,
     canvas: sdl2::render::WindowCanvas,
     pub event_pump: sdl2::EventPump,
 }
@@ -44,7 +43,6 @@ impl Default for IO {
         let window = video_subsys
             .window("chip8", DISPLAY_WIDTH as u32 * 8, DISPLAY_HEIGHT as u32 * 8)
             .position_centered()
-            .vulkan()
             .build()
             .map_err(|e| e.to_string())
             .unwrap();
@@ -57,11 +55,7 @@ impl Default for IO {
 
         let event_pump = sdl_context.event_pump().unwrap();
 
-        IO {
-            sdl_context,
-            canvas,
-            event_pump,
-        }
+        IO { canvas, event_pump }
     }
 }
 

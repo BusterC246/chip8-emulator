@@ -1,18 +1,12 @@
-use sdl2::keyboard::Scancode;
-
 use crate::io;
 use crate::io::scancode_to_byte;
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::thread;
-use std::time::Duration;
 
 pub struct Chip {
     pc: u16,
     sp: u8,
     i: u16,
-    dt: Arc<RwLock<u8>>,
-    st: Arc<RwLock<u8>>,
+    dt: u8,
+    st: u8,
     v: [u8; 16],
     stack: [u16; 16],
     mem: [u8; 4096],
@@ -43,46 +37,27 @@ impl Chip {
 
         instructions.copy_from_slice(rom);
 
-        let dt = Arc::new(RwLock::new(0));
-        let threaded_dt = Arc::clone(&dt);
-
-        thread::spawn(move || loop {
-            let mut dt = threaded_dt.write().unwrap();
-
-            if *dt > 0 {
-                *dt -= 1;
-
-                drop(dt);
-                thread::sleep(Duration::from_millis(16));
-            }
-        });
-
-        let st = Arc::new(RwLock::new(0));
-        let threaded_st = Arc::clone(&st);
-
-        thread::spawn(move || loop {
-            let mut st = threaded_st.write().unwrap();
-
-            if *st > 0 {
-                *st -= 1;
-
-                drop(st);
-                thread::sleep(Duration::from_millis(16));
-            }
-        });
-
         Chip {
             pc: 0x200,
             sp: 0,
             i: 0,
-            dt,
-            st,
+            dt: 0,
+            st: 0,
             v: [0; 16],
             stack: [0; 16],
             mem,
             fb: [[false; io::DISPLAY_WIDTH as usize]; io::DISPLAY_HEIGHT as usize],
             io: io::IO::default(),
         }
+    }
+
+    pub fn handle_events(&mut self) -> bool {
+        for event in self.io.event_pump.poll_iter() {
+            if let sdl2::event::Event::Quit { .. } = event {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn fetch(&mut self) -> u16 {
@@ -95,6 +70,13 @@ impl Chip {
     }
 
     pub fn execute(&mut self, opcode: u16) {
+        if self.dt > 0 {
+            self.dt -= 1;
+        }
+        if self.st > 0 {
+            self.st -= 1;
+        }
+
         let nibble: [u8; 4] = [
             (opcode >> 12) as u8,
             (opcode >> 8 & 0x000F) as u8,
@@ -134,7 +116,7 @@ impl Chip {
                 println!("CALL {:X}", opcode & 0x0FFF);
 
                 self.sp += 1;
-                self.pc = self.stack[self.sp as usize];
+                self.stack[self.sp as usize] = self.pc;
                 self.pc = opcode & 0x0FFF;
             }
             // 0x3XNN
@@ -216,7 +198,7 @@ impl Chip {
                         let diff =
                             self.v[nibble[1] as usize].overflowing_sub(self.v[nibble[2] as usize]);
                         self.v[nibble[1] as usize] = diff.0;
-                        self.v[0xF] = diff.1 as u8;
+                        self.v[0xF] = (!diff.1) as u8;
                     }
                     // 0x8XY6
                     6 => {
@@ -232,7 +214,7 @@ impl Chip {
                         let diff =
                             self.v[nibble[2] as usize].overflowing_sub(self.v[nibble[1] as usize]);
                         self.v[nibble[1] as usize] = diff.0;
-                        self.v[0xF] = diff.1 as u8;
+                        self.v[0xF] = (!diff.1) as u8;
                     }
                     // 0x8XYE
                     0xE => {
@@ -268,9 +250,13 @@ impl Chip {
             0xC => {
                 println!("RND V{:X} {:X}", nibble[1], opcode & 0x00FF);
 
-                self.v[nibble[1] as usize] = self.v[nibble[1] as usize]
-                    .wrapping_pow(self.v[nibble[1] as usize] as u32)
-                    & (opcode & 0x00FF) as u8;
+                self.v[nibble[1] as usize] = (((self.pc as u8)
+                    .wrapping_mul(137)
+                    .wrapping_add(self.v[0])
+                    .wrapping_add(self.v[1])
+                    .wrapping_add(self.dt)
+                    .wrapping_add(self.st)) as u8)
+                    & (opcode as u8 & 0x00FF);
             }
             // 0xDXYN
             0xD => {
@@ -278,35 +264,23 @@ impl Chip {
 
                 self.v[0xF] = 0;
 
-                for (y_offset, byte) in &mut self.mem
+                for (y_offset, byte) in self.mem
                     [self.i as usize..((self.i.wrapping_add(nibble[3] as u16)) as usize)]
                     .iter()
                     .enumerate()
                 {
                     for bit in 0..8 {
-                        if (byte >> bit) & 1 == 1 {
-                            if self.fb[((self.v[nibble[2] as usize].wrapping_add(y_offset as u8))
-                                % io::DISPLAY_HEIGHT)
-                                as usize][((self.v[nibble[1] as usize]
-                                .wrapping_add(bit))
-                                % io::DISPLAY_WIDTH)
-                                as usize]
-                            {
+                        if (byte >> (7 - bit)) & 1 == 1 {
+                            let x =
+                                (self.v[nibble[1] as usize].wrapping_add(bit)) % io::DISPLAY_WIDTH;
+                            let y = (self.v[nibble[2] as usize].wrapping_add(y_offset as u8))
+                                % io::DISPLAY_HEIGHT;
+
+                            if self.fb[y as usize][x as usize] {
                                 self.v[0xF] = 1;
                             }
 
-                            self.fb[((self.v[nibble[2] as usize].wrapping_add(y_offset as u8))
-                                % io::DISPLAY_HEIGHT)
-                                as usize][((self.v[nibble[1] as usize]
-                                .wrapping_add(bit))
-                                % io::DISPLAY_WIDTH)
-                                as usize] = !self.fb[((self.v[nibble[2] as usize]
-                                .wrapping_add(y_offset as u8))
-                                % io::DISPLAY_HEIGHT)
-                                as usize][((self.v[nibble[1] as usize]
-                                .wrapping_add(bit))
-                                % io::DISPLAY_WIDTH)
-                                as usize];
+                            self.fb[y as usize][x as usize] = !self.fb[y as usize][x as usize];
                         }
                     }
                 }
@@ -335,68 +309,37 @@ impl Chip {
                 }
             }
             0xF => {
-                match nibble[3] {
+                match (opcode & 0x00FF) as u8 {
                     // 0xFX07
                     0x07 => {
                         println!("LD V{:X} DT", nibble[1]);
 
-                        let dt = self.dt.read().unwrap();
-
-                        self.v[nibble[1] as usize] = *dt;
+                        self.v[nibble[1] as usize] = self.dt;
                     }
                     // 0xFX0A
                     0x0A => {
                         println!("LD V{:X} K", nibble[1]);
-                        let is_valid_scancode = |scancode: &Scancode| match scancode {
-                            Scancode::X
-                            | Scancode::Num1
-                            | Scancode::Num2
-                            | Scancode::Num3
-                            | Scancode::Q
-                            | Scancode::W
-                            | Scancode::E
-                            | Scancode::A
-                            | Scancode::S
-                            | Scancode::D
-                            | Scancode::Z
-                            | Scancode::C
-                            | Scancode::Num4
-                            | Scancode::R
-                            | Scancode::F
-                            | Scancode::V => true,
-                            _ => false,
-                        };
 
-                        let keyboard_state = self.io.event_pump.keyboard_state();
+                        let keyboard = self.io.event_pump.keyboard_state();
+                        let pressed = keyboard.pressed_scancodes().find_map(scancode_to_byte);
 
-                        'key_pressed: loop {
-                            let key_presses = keyboard_state
-                                .pressed_scancodes()
-                                .collect::<Vec<Scancode>>();
-
-                            for scancode in key_presses {
-                                if is_valid_scancode(&scancode) {
-                                    self.v[nibble[1] as usize] =
-                                        scancode_to_byte(scancode).unwrap();
-                                    break 'key_pressed;
-                                }
-                            }
+                        if let Some(key) = pressed {
+                            self.v[nibble[1] as usize] = key;
+                        } else {
+                            self.pc -= 2;
                         }
                     }
                     // 0xFX15
                     0x15 => {
                         println!("LD DT V{:X}", nibble[1]);
 
-                        let mut dt = self.dt.write().unwrap();
-                        *dt = self.v[nibble[1] as usize];
+                        self.dt = self.v[nibble[1] as usize];
                     }
                     // 0xFX18
                     0x18 => {
                         println!("LD ST V{:X}", nibble[1]);
 
-                        let mut st = self.st.write().unwrap();
-
-                        *st = self.v[nibble[1] as usize];
+                        self.st = self.v[nibble[1] as usize];
                     }
                     // 0xFX1E
                     0x1E => {
@@ -416,15 +359,15 @@ impl Chip {
 
                         self.mem[self.i as usize] = self.v[nibble[1] as usize] / 100;
                         self.mem[self.i as usize + 1] = self.v[nibble[1] as usize] / 10 % 10;
-                        self.mem[self.i as usize + 1] = self.v[nibble[1] as usize] % 10;
+                        self.mem[self.i as usize + 2] = self.v[nibble[1] as usize] % 10;
                     }
                     // 0xFX55
                     0x55 => {
                         println!("LD [I] V{:X}", nibble[1]);
 
-                        let registers = &self.v[..(nibble[1] as usize)];
+                        let registers = &self.v[..=(nibble[1] as usize)];
                         let mem_region = &mut self.mem
-                            [(self.i as usize)..((self.i + nibble[1] as u16) as usize)];
+                            [(self.i as usize)..((self.i + nibble[1] as u16 + 1) as usize)];
 
                         mem_region.copy_from_slice(registers);
                     }
@@ -432,9 +375,9 @@ impl Chip {
                     0x65 => {
                         println!("LD V{:X} [I]", nibble[1]);
 
-                        let registers = &mut self.v[..(nibble[1] as usize)];
-                        let mem_region =
-                            &self.mem[(self.i as usize)..((self.i + nibble[1] as u16) as usize)];
+                        let registers = &mut self.v[..=(nibble[1] as usize)];
+                        let mem_region = &self.mem
+                            [(self.i as usize)..((self.i + nibble[1] as u16 + 1) as usize)];
 
                         registers.copy_from_slice(mem_region);
                     }
